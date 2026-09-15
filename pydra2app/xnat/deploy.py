@@ -6,7 +6,6 @@ import xnat
 from pydra2app.core.exceptions import Pydra2AppError
 from pydra2app.core.utils import extract_file_from_docker_image
 
-
 logger = logging.getLogger("pydra2app-xnat")
 
 INTERNAL_INPUTS = ("pydra2app_flags", "PROJECT_ID", "SUBJECT_LABEL", "SESSION_LABEL")
@@ -238,7 +237,7 @@ def launch_cs_command(
     if status != "Complete":
         raise ValueError(
             f"Launching {cmd_name} in the XNAT CS failed with status {status} "
-            f"for inputs=\n{launch_json}:\n{out_str}"
+            f"for inputs={launch_json}:{out_str}"
         )
 
     return workflow_id, status, out_str
