@@ -1,15 +1,19 @@
 from __future__ import annotations
-import typing as ty
+
 import re
+import typing as ty
+
 import attrs
 from fileformats.core import to_mime
-from pydra.utils.typing import is_fileset_or_union, is_optional, optional_type
-from pydra2app.core.command.base import ContainerCommand
-from pydra2app.core.utils import logger
-from frametree.xnat import XnatViaCS
+from frametree.axes.medimage import MedImage
 from frametree.core.axes import Axes
 from frametree.core.utils import path2label
-from frametree.axes.medimage import MedImage
+from frametree.xnat import XnatViaCS
+from pydra.utils.typing import is_fileset_or_union, is_optional, optional_type
+
+from pydra2app.core.command.base import ContainerCommand
+from pydra2app.core.exceptions import Pydra2AppUnresolvedTaskError
+from pydra2app.core.utils import logger
 
 if ty.TYPE_CHECKING:
     from .image import XnatApp
@@ -34,7 +38,18 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
             XNAT container service command specification in JSON-like dict, which can be
             stored within the "org.nrg.commands" label of the container to allow the
             images to be automatically recognised.
+
+        Raises
+        ------
+        Pydra2AppUnresolvedTaskError
+            if the command's task can't be imported in the current environment, and
+            therefore the inputs/outputs of the command can't be introspected
         """
+        if self.deferred:
+            raise Pydra2AppUnresolvedTaskError(
+                f"Cannot generate the command JSON for '{self.name}' because its task, "
+                f"{self.task}, can't be imported in the current environment"
+            )
 
         cmd_json = self.init_command_json()
 

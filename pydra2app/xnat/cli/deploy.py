@@ -1,15 +1,19 @@
-import re
 import json
-from pathlib import Path
-import yaml
 import logging
+import os
+import re
 import typing as ty
+from pathlib import Path
+
 import click
 import xnat
-import os
-from .base import xnat_group
-from ..deploy import install_cs_command, launch_cs_command
+import yaml
 
+from pydra2app.xnat.command import XnatCommand
+from pydra2app.xnat.image import XnatApp
+
+from ..deploy import install_cs_command, launch_cs_command
+from .base import xnat_group
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
@@ -420,3 +424,55 @@ def deploy_pipelines(
         f"Successfully updated all container images from '{manifest['release']}' of "
         f"'{manifest['package']}' package that match provided filters"
     )
+
+
+@xnat_group.command(
+    name="make-command-json",
+    help="""Generate the command JSON for an XNAT command.
+Used internally during the build process of the app image, in order to generate the
+command JSON for tasks that can't be imported on the build host
+
+SPEC_PATH is the path to the app specification file.
+
+COMMAND_NAME is the name of the command to generate JSON for.
+
+OUTPUT_PATH is the path to write the generated JSON to.
+""",
+)
+@click.argument("spec_path", type=click.Path(exists=True, path_type=Path))
+@click.argument("command_name")
+@click.argument("output_path", type=click.Path(path_type=Path))
+@click.option(
+    "--org",
+    default=None,
+    help=(
+        "The organisation the image belongs to, which is used along with its name to "
+        "reference the image in the generated JSON. Overrides the one in the spec"
+    ),
+)
+def make_command_json(
+    spec_path: Path, command_name: str, output_path: Path, org: ty.Optional[str]
+) -> None:
+    """Generate the command JSON for an XNAT command."""
+    logging.info(
+        "Generating command JSON for '%s' command of the app specified at '%s'",
+        command_name,
+        spec_path,
+    )
+
+    # NB: the spec is loaded from an already parsed dictionary, instead of from the
+    # path, so that the name and organisation of the image aren't inferred from the
+    # location of the spec file (i.e. '/pydra2app-spec.yaml' within the image) instead
+    # of the ones it was built with
+    with open(spec_path) as f:
+        spec = yaml.load(f, Loader=yaml.SafeLoader)
+    spec.setdefault("name", spec_path.stem)
+    if org is not None:
+        spec["org"] = org
+    app = XnatApp.load(spec)
+    command: XnatCommand = app.command(command_name)
+    command_json = command.make_json()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(command_json, f, indent=4)
+    logging.info("Wrote command JSON to '%s'", output_path)
