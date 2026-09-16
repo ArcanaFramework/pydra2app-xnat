@@ -5,7 +5,7 @@
 [![Latest Version](https://img.shields.io/pypi/v/pydra2app-xnat.svg)](https://pypi.python.org/pypi/pydra2app-xnat/)
 [![docs](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://arcanaframework.github.io/pydra2app)
 
-An extension for the [Pydra2App](http://arcanaframework.github.io/pydra2app) framework that support for building [XNAT](https://xnat.org) "apps" (container service docker images)
+An extension for the [Pydra2App](http://arcanaframework.github.io/pydra2app) framework that support for building [XNAT](https://xnat.org) "apps" (container service docker images) from Pydra tasks.
 
 ## Quick Installation
 
