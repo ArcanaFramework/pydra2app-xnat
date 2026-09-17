@@ -18,6 +18,14 @@ from pydra2app.xnat.image import XnatApp
 # image) but is unlikely to be installed in the environment the image is built from.
 # Since the task can't be imported on the build host, the command JSON it describes can
 # only be generated inside the image, once the package has been installed in it
+# Defined here rather than taken from the session-scoped 'command_spec' fixture, as
+# that dict is shared with every other test in the session, and the fields of the command
+# JSON asserted on below depend on exactly what it contains
+CONCATENATE_COMMAND_SPEC = {
+    "task": "frametree.testing.tasks:Concatenate",
+    "operates_on": "medimage/session",
+}
+
 UNRESOLVABLE_TASK_PACKAGE = "pydra-tasks-afni"
 UNRESOLVABLE_TASK = "pydra.tasks.afni.v25.preprocess.automask:Automask"
 # 'simplejson' is imported by the AFNI tasks but isn't declared as a dependency of the
@@ -61,13 +69,14 @@ def save_spec(spec: ty.Dict[str, ty.Any], spec_path: Path) -> Path:
 
 
 def test_make_command_json(
-    command_spec: ty.Dict[str, ty.Any],
     work_dir: Path,
     cli_runner: ty.Callable[..., ty.Any],
 ) -> None:
     """The JSON written by the CLI should match the one generated in-process"""
 
-    spec_path = save_spec(image_spec(command_spec), work_dir / "test-image.yaml")
+    spec_path = save_spec(
+        image_spec(deepcopy(CONCATENATE_COMMAND_SPEC)), work_dir / "test-image.yaml"
+    )
     # Nest the output within a directory that doesn't exist yet, as it won't within the
     # image being built either
     output_path = work_dir / "xnat_commands" / "test-command.json"
@@ -96,13 +105,14 @@ def test_make_command_json(
 
 
 def test_make_command_json_unrecognised_command(
-    command_spec: ty.Dict[str, ty.Any],
     work_dir: Path,
     cli_runner: ty.Callable[..., ty.Any],
 ) -> None:
     """Referencing a command that isn't in the spec should fail, not write an empty JSON"""
 
-    spec_path = save_spec(image_spec(command_spec), work_dir / "test-image.yaml")
+    spec_path = save_spec(
+        image_spec(deepcopy(CONCATENATE_COMMAND_SPEC)), work_dir / "test-image.yaml"
+    )
     output_path = work_dir / "test-command.json"
 
     result = cli_runner(
