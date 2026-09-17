@@ -1,14 +1,20 @@
 from __future__ import annotations
-import sys
-from pathlib import Path
+
 import json
+import sys
 import typing as ty
+from pathlib import Path
+
 import attrs
-from neurodocker.reproenv import DockerRenderer
-from frametree.xnat import XnatViaCS
 from frametree.core.serialize import ClassResolver, ObjectListConverter
 from frametree.core.store import Store
+from frametree.xnat import XnatViaCS
+from neurodocker.reproenv import DockerRenderer
+
+from pydra2app.core.exceptions import Pydra2AppDeferredToImageError
 from pydra2app.core.image import App
+from pydra2app.core.utils import logger
+
 from .command import XnatCommand
 
 
@@ -89,15 +95,13 @@ class XnatApp(App):  # type: ignore[misc]
         self,
         dockerfile: DockerRenderer,
         build_dir: Path,
-    ) -> ty.List[ty.Dict[str, ty.Any]]:
+    ) -> list[dict[str, ty.Any]]:
         """Copy the generated command JSON within the Docker image for future reference
 
         Parameters
         ----------
         dockerfile : DockerRenderer
             Neurodocker renderer to build
-        xnat_command : ty.Dict[str, Any]
-            XNAT command to write to file within the image for future reference
         build_dir : Path
             path to build directory
 
@@ -110,14 +114,46 @@ class XnatApp(App):  # type: ignore[misc]
         command_jsons_dir.mkdir(parents=True, exist_ok=True)
         xnat_commands = []
         for command in self.commands:
-            xnat_command = command.make_json()
-            with open(command_jsons_dir / f"{command.name}.json", "w") as f:
-                json.dump(xnat_command, f, indent="    ")
-            dockerfile.copy(
-                source=[f"./xnat_commands/{command.name}.json"],
-                destination=f"/xnat_commands/{command.name}.json",
-            )
-            xnat_commands.append(xnat_command)
+            in_image_dest_path = f"/xnat_commands/{command.name}.json"
+            try:
+                xnat_command = command.make_json()
+            except Pydra2AppDeferredToImageError:
+                # If the command JSON can't be generated on the build host, e.g. because
+                # the command's task can't be imported or a resource it requires hasn't
+                # been downloaded, we run the CLI command to generate it inside the
+                # image, where they are available, as a step of the image build.
+                make_json_args = self.activate_conda() + [
+                    "pydra2app",
+                    "ext",
+                    "xnat",
+                    "make-command-json",
+                    self.IN_DOCKER_SPEC_PATH,
+                    command.name,
+                    in_image_dest_path,
+                ]
+                if self.org:
+                    # Passed explicitly so the image reference in the generated JSON
+                    # doesn't depend on how the org is saved within the spec
+                    make_json_args.extend(["--org", self.org])
+                dockerfile.run(" ".join(make_json_args))
+                logger.warning(
+                    "Could not generate the command JSON for the '%s' command at Dockerfile "
+                    "generation time, because it couldn't be resolved in the current "
+                    "environment. The command JSON will instead be generated inside the image "
+                    "at build time and be available at '%s' within it. However, it will not be "
+                    "included in the image label and will need to be manually installed via "
+                    "the XNAT plugin administration settings",
+                    command.name,
+                    in_image_dest_path,
+                )
+            else:
+                with open(command_jsons_dir / f"{command.name}.json", "w") as f:
+                    json.dump(xnat_command, f, indent="    ")
+                dockerfile.copy(
+                    source=[f"./xnat_commands/{command.name}.json"],
+                    destination=in_image_dest_path,
+                )
+                xnat_commands.append(xnat_command)
         return xnat_commands
 
     def save_store_config(

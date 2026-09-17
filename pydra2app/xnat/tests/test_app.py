@@ -42,13 +42,13 @@ def run_spec(
     run_prefix += upload_method
     access_method = "cs" + ("_internal" if upload_method == "internal" else "")
     if task == "func":
-        cmd_spec = command_spec
+        cmd_spec = deepcopy(command_spec)
         spec["build"] = {
             "org": "pydra2app-tests",
             "name": run_prefix + "-concatenate-xnat-cs",
             "version": "1.0",
             "title": "A pipeline to test Pydra2App's deployment tool",
-            "commands": {"concatenate-test": command_spec},
+            "commands": {"concatenate-test": cmd_spec},
             "authors": [{"name": "Some One", "email": "some.one@an.email.org"}],
             "docs": {
                 "info_url": "http://concatenate.readthefakedocs.io",
@@ -81,8 +81,8 @@ def run_spec(
         )
         spec["params"] = {"duplicates": 2}
     elif task == "bidsapp":
-        bids_command_spec["configuration"] = {"app": "/launch.sh"}
-        cmd_spec = bids_command_spec
+        cmd_spec = deepcopy(bids_command_spec)
+        cmd_spec["configuration"] = {"app": "/launch.sh"}
         spec["build"] = {
             "org": "pydra2app-tests",
             "name": run_prefix + "-bids-app-xnat-cs",
@@ -108,7 +108,7 @@ def run_spec(
                     "pydra-compose-bidsapp",
                 ],
             },
-            "commands": {"bids-test-command": bids_command_spec},
+            "commands": {"bids-test-command": cmd_spec},
             "authors": [
                 {"name": "Some One Else", "email": "some.oneelse@an.email.org"}
             ],

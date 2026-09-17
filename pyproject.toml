@@ -79,6 +79,19 @@ line-length = 88
 target-version = ["py38"]
 exclude = "_version.py"
 
+[tool.isort]
+profile = "black"
+known_first_party = ["pydra2app"]
+honor_noqa = true  # so that '# noqa' imports are skipped, as Ruff skips them
+
+# Kept in step with the isort config above so that both tools agree on how imports
+# should be sorted, in particular on which packages are first-party
+[tool.ruff.lint.isort]
+known-first-party = ["pydra2app"]
+# xnatpy's 'xnat' package is otherwise taken to be first-party, as it shares its name
+# with the 'pydra2app/xnat' sub-package
+known-third-party = ["xnat"]
+
 [tool.codespell]
 ignore-words = ".codespell-ignorewords"
 
