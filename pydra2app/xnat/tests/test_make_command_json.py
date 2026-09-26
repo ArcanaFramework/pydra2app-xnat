@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 import typing as ty
@@ -219,7 +220,8 @@ class TestUnresolvableTask:
         )
         # The task's package needs to be installed and the spec copied into the image
         # before the command JSON can be generated from them
-        assert index_of(f'"{UNRESOLVABLE_TASK_PACKAGE}"') < make_json_line
+        # NB: pip packages are shell-quoted as required when they are rendered
+        assert index_of(f" {shlex.quote(UNRESOLVABLE_TASK_PACKAGE)} ") < make_json_line
         assert index_of(unresolvable_app.IN_DOCKER_SPEC_PATH + '"') < make_json_line
 
         # The org is passed explicitly so the image reference in the generated JSON
