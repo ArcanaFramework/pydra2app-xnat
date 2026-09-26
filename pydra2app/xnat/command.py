@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import typing as ty
 
 import attrs
@@ -95,6 +96,9 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
             "datatype": "docker",
             # "command-line": cmdline,
             "override-entrypoint": True,
+            # User-provided values are passed to the command line via environment
+            # variables (see `_env_var_arg`)
+            "environment-variables": {},
             "mounts": [
                 {"name": "in", "writable": False, "path": str(XnatViaCS.INPUT_MOUNT)},
                 {"name": "out", "writable": True, "path": str(XnatViaCS.OUTPUT_MOUNT)},
@@ -164,7 +168,10 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
                     "replacement-key": replacement_key,
                 }
             )
-            cmd_args.append(f"--input {src.name} '{replacement_key}'")
+            cmd_args.append(
+                f"--input {shlex.quote(src.name)} "
+                + self._env_var_arg(cmd_json, "INPUT", src.name, replacement_key)
+            )
 
         return cmd_args
 
@@ -194,7 +201,10 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
                     "replacement-key": replacement_key,
                 }
             )
-            cmd_args.append(f"--parameter {param.name} '{replacement_key}'")
+            cmd_args.append(
+                f"--parameter {shlex.quote(param.name)} "
+                + self._env_var_arg(cmd_json, "PARAM", param.name, replacement_key)
+            )
 
         return cmd_args
 
@@ -244,7 +254,9 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
                         "format": sink_type.mime_like,
                     }
                 )
-                cmd_args.append(f"--output {sink.name} '{sink.name}'")
+                cmd_args.append(
+                    f"--output {shlex.quote(sink.name)} {shlex.quote(sink.name)}"
+                )
             else:
                 if sink.name in input_names:
                     raise ValueError(
@@ -265,7 +277,10 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
                         "replacement-key": replacement_key,
                     }
                 )
-                cmd_args.append(f"--output {sink.name} '{replacement_key}'")
+                cmd_args.append(
+                    f"--output {shlex.quote(sink.name)} "
+                    + self._env_var_arg(cmd_json, "OUTPUT", sink.name, replacement_key)
+                )
 
         if self.internal_upload:
             cmd_args.append("--internal-upload")
@@ -406,6 +421,47 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
             )
 
         return cmd_args
+
+    @staticmethod
+    def _env_var_arg(
+        cmd_json: ty.Dict[str, ty.Any], kind: str, name: str, replacement_key: str
+    ) -> str:
+        """Registers an environment variable in the command JSON that the XNAT CS will
+        set to the value of the given replacement key, and returns a reference to it to
+        be inserted into the command line.
+
+        The XNAT CS substitutes input values into the command line without escaping
+        them, and then runs it via `/bin/sh -c` (when "override-entrypoint" is set), so
+        values containing quotes or other special characters could otherwise break (or
+        inject into) the command. Values of environment variables aren't parsed by the
+        shell, and referencing them within double quotes passes each one through as a
+        single argument, whatever characters it contains.
+
+        Parameters
+        ----------
+        cmd_json : dict
+            JSON-like dictionary to be passed to the XNAT container service
+        kind : str
+            the kind of value, e.g. "INPUT", "PARAM" or "OUTPUT"
+        name : str
+            the name of the input/parameter/output
+        replacement_key : str
+            the replacement key of the command input that provides the value
+
+        Returns
+        -------
+        str
+            the double-quoted reference to the environment variable
+        """
+        env_var = f"PYDRA2APP_{kind}_" + re.sub(r"[^A-Z0-9]+", "_", name.upper())
+        env_vars = cmd_json["environment-variables"]
+        if env_var in env_vars:
+            raise ValueError(
+                f"Environment variable name clash for {kind.lower()} {name!r} "
+                f"({env_var!r})"
+            )
+        env_vars[env_var] = replacement_key
+        return f'"${env_var}"'
 
     @classmethod
     def path2xnatname(cls, path: str) -> str:

@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import typing as ty
 from copy import deepcopy
 from importlib.util import find_spec
@@ -290,3 +293,74 @@ def test_command_json_generated_within_image(work_dir: Path, run_prefix: str) ->
     in_file = next(i for i in command_json["inputs"] if i["name"] == "in_file")
     assert "the image to generate the mask from" in in_file["description"]
     assert "pydra2app ext xnat cs-entrypoint" in command_json["command-line"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires /bin/sh")
+def test_command_line_values_passed_verbatim(work_dir: Path) -> None:
+    """Simulates how the XNAT container service resolves and runs the command line
+    (i.e. substituting values for the replacement keys without escaping them, and then
+    running the result with `/bin/sh -c`), and checks that values containing quotes and
+    other shell special characters reach the entrypoint unaltered"""
+
+    spec_path = save_spec(
+        image_spec(deepcopy(CONCATENATE_COMMAND_SPEC)), work_dir / "test-image.yaml"
+    )
+    command_json = XnatApp.load(spec_path).command("test-command").make_json()
+
+    # NB: the XNAT CS rejects values containing ";", "&&", "||", "`" or "("
+    tricky = 'it\'s a "quoted" value with $HOME, a | pipe, > redirect, *.txt\nnewline'
+    values_by_key = {
+        i["replacement-key"]: str(i.get("default-value") or "")
+        for i in command_json["inputs"]
+    }
+    values_by_key.update(
+        {
+            "[IN_FILE1_INPUT]": tricky,
+            "[DUPLICATES_PARAM]": "it's 2",
+            "[OUT_FILE_OUTPUT]": "out 'file'",
+            "[PROJECT_ID]": "PROJECT",
+            "[SESSION_LABEL]": "SESSION",
+            "[SUBJECT_LABEL]": "SUBJECT",
+        }
+    )
+
+    def resolve(template: str) -> str:
+        # Same as the XNAT CS's CommandResolutionServiceImpl.resolveTemplate
+        for key, value in values_by_key.items():
+            template = template.replace(key, value)
+        return template
+
+    command_line = resolve(command_json["command-line"])
+    env_vars = {
+        k: resolve(v) for k, v in command_json.get("environment-variables", {}).items()
+    }
+
+    # Stub out the executables in the command line to print the args they receive
+    bin_dir = work_dir / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "pydra2app").write_text(
+        f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+    )
+    (bin_dir / "conda").write_text('#!/bin/sh\nshift 4\nexec "$@"\n')  # conda run ...
+    for exe in bin_dir.iterdir():
+        exe.chmod(0o755)
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", command_line],
+        env={**os.environ, **env_vars, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    args = json.loads(result.stdout.strip().splitlines()[-1])
+
+    def value_of(option: str, name: str) -> str:
+        index = next(
+            i for i in range(len(args) - 1) if args[i] == option and args[i + 1] == name
+        )
+        return args[index + 2]  # type: ignore[no-any-return]
+
+    assert value_of("--input", "in_file1") == tricky
+    assert value_of("--parameter", "duplicates") == "it's 2"
+    assert value_of("--output", "out_file") == "out 'file'"
+    assert args[:4] == ["ext", "xnat", "cs-entrypoint", "xnat-cs//PROJECT"]
