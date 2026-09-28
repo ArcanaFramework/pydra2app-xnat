@@ -17,6 +17,25 @@ $ pip3 install pydra2app-xnat
 
 This will also install the core Pydra2App package and any required dependencies.
 
+## Reconcile XNAT pipelines
+
+`deploy-pipelines` performs one reconciliation against a release catalogue and exits:
+
+```bash
+PIPELINE_CATALOGUE_URL=https://example.org/pipeline-release.json \
+XNAT_HOST=https://xnat.example.org \
+XNAT_USER=username \
+XNAT_PASS=password \
+pydra2app ext xnat deploy-pipelines
+```
+
+The catalogue may instead be passed as a local file or URL argument. The command
+reports each pipeline as `installed`, `updated`, `unchanged`, or `failed`, and exits
+nonzero if any pipeline fails. New commands are installed disabled, existing commands
+are updated in place (keeping their site and project enablement), and commands absent
+from the catalogue are not removed. The XNAT user must be an administrator or a
+Container Service manager.
+
 ## License
 
 This work is licensed under a [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](http://creativecommons.org/licenses/by-nc-sa/4.0/)

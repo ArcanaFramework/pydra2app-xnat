@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import re
 import typing as ty
 from pathlib import Path
 
@@ -11,6 +10,11 @@ import yaml
 
 from pydra2app.xnat.command import XnatCommand
 from pydra2app.xnat.image import XnatApp
+from pydra2app.xnat.reconcile import (
+    ReconciliationError,
+    load_catalogue,
+    reconcile_commands,
+)
 
 from ..deploy import install_cs_command, launch_cs_command
 from .base import xnat_group
@@ -23,6 +27,7 @@ XNAT_USER_KEY = "XNAT_USER"
 XNAT_PASS_KEY = "XNAT_PASS"
 XNAT_AUTH_FILE_KEY = "XNAT_AUTH_FILE"
 XNAT_AUTH_FILE_DEFAULT = Path("~/.pydra2app_xnat_user_token.json").expanduser()
+PIPELINE_CATALOGUE_URL_KEY = "PIPELINE_CATALOGUE_URL"
 
 
 def load_auth(
@@ -295,27 +300,21 @@ def save_token(auth_file: Path, server: str, user: str, password: str) -> None:
 
 @xnat_group.command(
     name="deploy-pipelines",
-    help=f"""Updates the installed pipelines on an XNAT instance from a manifest
-JSON file using the XNAT instance's REST API.
+    help=f"""Reconciles XNAT commands with a pipeline release catalogue.
 
-MANIFEST_FILE is a JSON file containing a list of container images built in a release
-created by `pydra2app deploy xnat build`
+CATALOGUE is the path or URL of a pipeline-release.json catalogue, and can
+instead be given by the {PIPELINE_CATALOGUE_URL_KEY} environment variable.
 
 Authentication credentials can be passed through the {XNAT_USER_KEY}
 and {XNAT_PASS_KEY} environment variables. Otherwise, tokens can be saved
 in a JSON file passed to '--auth'.
-
-Which of available pipelines to install can be controlled by a YAML file passed to the
-'--filters' option of the form
-    \b
-    include:
-    - tag: ghcr.io/Australian-Imaging-Service/mri.human.neuro.*
-    - tag: ghcr.io/Australian-Imaging-Service/pet.rodent.*
-    exclude:
-    - tag: ghcr.io/Australian-Imaging-Service/mri.human.neuro.bidsapps.
 """,  # noqa
 )  # type: ignore[misc]
-@click.argument("manifest_file", type=click.File())
+@click.argument(
+    "catalogue",
+    required=False,
+    envvar=PIPELINE_CATALOGUE_URL_KEY,
+)
 @click.option(
     "--server",
     envvar=XNAT_HOST_KEY,
@@ -339,91 +338,37 @@ Which of available pipelines to install can be controlled by a YAML file passed 
     envvar=XNAT_AUTH_FILE_KEY,
     help=("The path to save the alias/token pair to"),
 )
-@click.option(
-    "--filters",
-    "filters_file",
-    default=None,
-    type=click.File(),
-    help=("a YAML file containing filter rules for the images to install"),
-)
 def deploy_pipelines(
-    manifest_file: ty.TextIO,
+    catalogue: str,
     server: str,
     user: str,
     password: str,
     auth_file: Path,
-    filters_file: ty.TextIO,
 ) -> None:
-
-    server, user, password = load_auth(server, user, password, auth_file)
-
-    manifest = json.load(manifest_file)
-    filters = yaml.load(filters_file, Loader=yaml.Loader) if filters_file else {}
-
-    def matches_entry(
-        entry: ty.Dict[str, ty.Any],
-        match_exprs: ty.List[ty.Dict[str, str]],
-        default: bool = True,
-    ) -> bool:
-        """Determines whether an entry meets the inclusion and exclusion criteria
-
-        Parameters
-        ----------
-        entry : ty.Dict[str, Any]
-            a image entry in the manifest
-        exprs : list[ty.Dict[str, str]]
-            match criteria
-        default : bool
-            the value if match_exprs are empty
-
-        Returns
-        -------
-        bool
-            whether the entry meets the inclusion criteria
-        """
-        if not match_exprs:
-            return default
-        return bool(
-            re.match(
-                "|".join(
-                    i["name"].replace(".", "\\.").replace("*", ".*")
-                    for i in match_exprs
-                ),
-                entry["name"],
-            )
+    if not catalogue:
+        raise click.UsageError(
+            f"Provide a catalogue file or URL, or set {PIPELINE_CATALOGUE_URL_KEY}"
         )
+    try:
+        desired_pipelines = load_catalogue(catalogue)
+    except ReconciliationError as error:
+        raise click.ClickException(str(error)) from error
+    server, user, password = load_auth(server, user, password, auth_file)
 
     with xnat.connect(
         server=server,
         user=user,
         password=password,
     ) as xlogin:
+        try:
+            results = reconcile_commands(xlogin, desired_pipelines)
+        except ReconciliationError as error:
+            raise click.ClickException(str(error)) from error
 
-        for entry in manifest["images"]:
-            if matches_entry(entry, filters.get("include")) and not matches_entry(
-                entry, filters.get("exclude"), default=False
-            ):
-                tag = f"{entry['name']}:{entry['version']}"  # noqa
-                xlogin.post(
-                    "/xapi/docker/pull", query={"image": tag, "save-commands": True}
-                )
-
-                # Enable the commands in the built image
-                for cmd in xlogin.get("/xapi/commands").json():
-                    if cmd["image"] == tag:
-                        for wrapper in cmd["xnat"]:
-                            xlogin.put(
-                                f"/xapi/commands/{cmd['id']}/"
-                                f"wrappers/{wrapper['id']}/enabled"
-                            )
-                click.echo(f"Installed and enabled {tag}")
-            else:
-                click.echo(f"Skipping {tag} as it doesn't match filters")
-
-    click.echo(
-        f"Successfully updated all container images from '{manifest['release']}' of "
-        f"'{manifest['package']}' package that match provided filters"
-    )
+    for result in results:
+        click.echo(result.summary())
+    if any(result.status == "failed" for result in results):
+        raise click.exceptions.Exit(1)
 
 
 @xnat_group.command(
