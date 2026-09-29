@@ -19,11 +19,11 @@ in the format <store-nickname>//<dataset-id>[@<dataset-name>]
 """,
 )  # type: ignore[misc]
 @click.argument("address")
-@entrypoint_opts.data_columns  # type: ignore[misc]
-@entrypoint_opts.parameterisation  # type: ignore[misc]
-@entrypoint_opts.execution  # type: ignore[misc]
-@entrypoint_opts.debugging  # type: ignore[misc]
-@entrypoint_opts.dataset_config  # type: ignore[misc]
+@entrypoint_opts.data_columns  # type: ignore[untyped-decorator]
+@entrypoint_opts.parameterisation  # type: ignore[untyped-decorator]
+@entrypoint_opts.execution  # type: ignore[untyped-decorator]
+@entrypoint_opts.debugging  # type: ignore[untyped-decorator]
+@entrypoint_opts.dataset_config  # type: ignore[untyped-decorator]
 @click.option(
     "--internal-upload/--external-upload",
     type=bool,
