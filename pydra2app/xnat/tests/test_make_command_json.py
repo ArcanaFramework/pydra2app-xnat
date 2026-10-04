@@ -11,7 +11,6 @@ from pathlib import Path
 import docker
 import pytest
 import yaml
-from frametree.core.serialize import ClassResolver
 from frametree.core.utils import show_cli_trace
 
 from pydra2app.core.exceptions import Pydra2AppUnresolvedTaskError
@@ -153,13 +152,13 @@ class TestUnresolvableTask:
     def unresolvable_app(
         self, unresolvable_image_spec: ty.Dict[str, ty.Any], run_prefix: str
     ) -> XnatApp:
-        # `pydra2app make` loads specs within this context, so that tasks that can't be
+        # `pydra2app make` loads specs allowing deferral, so that tasks that can't be
         # imported are left as the address they were specified by instead of raising
-        with ClassResolver.FALLBACK_TO_STR:
-            return XnatApp.load(
-                unresolvable_image_spec,
-                name=run_prefix + "-unresolvable-task",
-            )
+        return XnatApp.load(
+            unresolvable_image_spec,
+            name=run_prefix + "-unresolvable-task",
+            allow_deferred=True,
+        )
 
     def test_command_json_cant_be_generated_on_build_host(
         self, unresolvable_app: XnatApp
@@ -253,8 +252,9 @@ def test_command_json_generated_within_image(work_dir: Path, run_prefix: str) ->
         packages={"pip": UNRESOLVABLE_TASK_PIP_PACKAGES},
     )
 
-    with ClassResolver.FALLBACK_TO_STR:
-        app = XnatApp.load(spec, name=run_prefix + "-unresolvable-task-build")
+    app = XnatApp.load(
+        spec, name=run_prefix + "-unresolvable-task-build", allow_deferred=True
+    )
 
     app.make(
         build_dir=work_dir / "build",
@@ -366,3 +366,70 @@ def test_command_line_values_passed_verbatim(work_dir: Path) -> None:
     assert value_of("--parameter", "duplicates") == "it's 2"
     assert value_of("--output", "out_file") == "out 'file'"
     assert args[:4] == ["ext", "xnat", "cs-entrypoint", "xnat-cs//PROJECT"]
+
+
+MONAI_BUNDLE_PATH = "/monai-bundles/spleen_ct_segmentation"
+
+MONAI_COMMAND_SPEC = {
+    # the bundle is only unpacked within the image being built
+    "task": {"type": "monai", "bundle": MONAI_BUNDLE_PATH},
+    "operates_on": "medimage/session",
+    "sources": {"image": {"field": "image", "type": "medimage/nifti-gz"}},
+    "sinks": {"pred": {"field": "pred", "type": "medimage/nifti-gz"}},
+}
+
+
+def test_monai_bundle_within_image_is_deferred(work_dir: Path) -> None:
+    """A command whose task refers to a MONAI bundle that is only present within the
+    image being built is deferred, and its command JSON generated within the image,
+    once the bundle has been added to it"""
+    pytest.importorskip("pydra.compose.monai")
+
+    spec = image_spec(
+        deepcopy(MONAI_COMMAND_SPEC),
+        org=ORG,
+        resources={
+            "spleen_ct_segmentation-bundle": {
+                "path": MONAI_BUNDLE_PATH,
+                "url": "https://example.org/spleen_ct_segmentation.zip",
+                "extract": True,
+            }
+        },
+    )
+    app = XnatApp.load(spec, name="monai-bundle-test", allow_deferred=True)
+    command = app.command("test-command")
+    assert command.deferred
+    assert command.image is app
+    # held as they were specified, to be matched against the task within the image
+    assert command.sources == MONAI_COMMAND_SPEC["sources"]
+    assert command.sinks == MONAI_COMMAND_SPEC["sinks"]
+
+    build_dir = work_dir / "build"
+    build_dir.mkdir()
+    instructions = (
+        app.construct_dockerfile(build_dir, use_local_packages=True, pypi_fallback=True)
+        .render()
+        .splitlines()
+    )
+
+    def index_of(snippet: str) -> int:
+        return next(i for i, ln in enumerate(instructions) if snippet in ln)
+
+    # the bundle is downloaded and unpacked before the command JSON is generated
+    assert index_of(f'mkdir -p "{MONAI_BUNDLE_PATH}"') < index_of(
+        "pydra2app ext xnat make-command-json "
+        f"{app.IN_DOCKER_SPEC_PATH} test-command /xnat_commands/test-command.json"
+    )
+
+
+def test_monai_bundle_outside_resources_is_raised() -> None:
+    """A missing bundle that isn't provided by one of the image's resources is a
+    genuine error"""
+    pytest.importorskip("pydra.compose.monai")
+
+    with pytest.raises(FileNotFoundError):
+        XnatApp.load(
+            image_spec(deepcopy(MONAI_COMMAND_SPEC), org=ORG),
+            name="monai-bundle-test",
+            allow_deferred=True,
+        )

@@ -6,13 +6,14 @@ import typing as ty
 from pathlib import Path
 
 import attrs
-from frametree.core.serialize import ClassResolver, ObjectListConverter
+from frametree.core.serialize import ClassResolver
 from frametree.core.store import Store
 from frametree.xnat import XnatViaCS
 from neurodocker.reproenv import DockerRenderer
 
 from pydra2app.core.exceptions import Pydra2AppDeferredToImageError
 from pydra2app.core.image import App
+from pydra2app.core.image.app import commands_converter
 from pydra2app.core.utils import logger
 
 from .command import XnatCommand
@@ -28,9 +29,8 @@ class XnatApp(App):  # type: ignore[misc]
     )
 
     commands: ty.List[XnatCommand] = attrs.field(
-        converter=ObjectListConverter(  # type: ignore[misc]
-            XnatCommand
-        )  # Change the command type to XnatCommand subclass
+        # Change the command type to XnatCommand subclass
+        converter=commands_converter(XnatCommand),  # type: ignore[misc]
     )
 
     @commands.validator
