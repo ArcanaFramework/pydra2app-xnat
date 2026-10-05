@@ -23,7 +23,11 @@ if ty.TYPE_CHECKING:
 @attrs.define(kw_only=True, auto_attribs=False)
 class XnatCommand(ContainerCommand):  # type: ignore[misc]
 
-    image: XnatApp = attrs.field(default=None)
+    # NB: only the type of the inherited `image` field is narrowed here, rather than
+    # redefining the field, as that would move it after `task` in the order the fields
+    # are initialised, and it needs to be set before the task is loaded (see
+    # `App.can_defer_task`)
+    image: XnatApp
     internal_upload: bool = attrs.field(default=False)
 
     # Hard-code the axes of XNAT commands to be medimage
