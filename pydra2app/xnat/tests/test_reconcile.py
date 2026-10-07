@@ -2,6 +2,7 @@ import functools
 import hashlib
 import importlib
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from pydra2app.xnat.cli.deploy import deploy_pipelines
 from pydra2app.xnat.reconcile import (
     ReconciliationError,
     load_catalogue,
+    load_config,
     reconcile_commands,
 )
 
@@ -55,12 +57,22 @@ class FakeXnat:
             )
         return wrappers
 
+    def _wrapper_key(self, path):
+        # /xapi/commands/{command id}/wrappers/{wrapper name}/enabled
+        _, _, _, command_id, _, wrapper_name, _ = path.split("/")
+        command = next(c for c in self.commands if c["id"] == int(command_id))
+        wrapper = next(w for w in command["xnat"] if w["name"] == wrapper_name)
+        return command["id"], wrapper["id"]
+
     def get(self, path):
         self.calls.append(("get", path, None))
-        return Response([dict(command) for command in self.commands])
+        if path == "/xapi/commands":
+            return Response([dict(command) for command in self.commands])
+        return Response(self._wrapper_key(path) in self.enabled)
 
     def put(self, path):
         self.calls.append(("put", path, None))
+        self.enabled.add(self._wrapper_key(path))
 
     def post(self, path, json):
         self.calls.append(("post", path, json))
@@ -297,3 +309,116 @@ def test_api_failure_is_reported_and_cli_exits_nonzero(tmp_path):
 
     assert result.exit_code == 1
     assert result.output.startswith("pipeline: failed")
+
+
+@pytest.mark.parametrize(
+    "content, message",
+    [
+        ("include: [", "Could not load reconciler config"),
+        ("- mri.*", "config must be a YAML mapping"),
+        ("includes: [mri.*]", "Unknown config keys: 'includes'"),
+        ("include: mri.*", "config.include must be a non-empty list"),
+        ("include: []", "config.include must be a non-empty list"),
+        ("exclude: ['']", "config.exclude must be a non-empty list"),
+        ("enablement: yes", "config.enablement must be"),
+    ],
+)
+def test_invalid_config_fails_clearly(tmp_path, content, message):
+    path = tmp_path / "config.yaml"
+    path.write_text(content)
+
+    with pytest.raises(ReconciliationError, match=message):
+        load_config(path)
+
+
+def test_config_selects_pipelines_and_leaves_excluded_ones_alone(tmp_path, caplog):
+    ids = ["mri.neuro.bids", "mri.neuro.fs", "pet.suv"]
+    path, downloads = write_catalogue(
+        tmp_path,
+        [(pipeline_id, ["example"]) for pipeline_id in ids],
+        {(i, "example"): command_bytes(name=f"{i}.example") for i in ids},
+    )
+    # Only the selected pipeline's command can be downloaded
+    downloads = {url: c for url, c in downloads.items() if "/mri.neuro.fs." in url}
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "include: [mri.*, ct.*]\nexclude: [mri.neuro.bids]\nenablement: auto\n"
+    )
+    config = load_config(config_path)
+    # An excluded command that is installed but outdated and disabled
+    xlogin = FakeXnat(
+        [
+            {
+                "id": 1,
+                "name": "mri.neuro.bids.example",
+                "image": "ghcr.io/example@sha256:" + "b" * 64,
+                "xnat": [{"id": 7, "name": "example"}],
+            }
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        desired = load_catalogue(path, download=downloads.__getitem__, config=config)
+    results = reconcile_commands(xlogin, desired, auto_enable=True)
+
+    assert config.enablement == "auto"
+    assert [result.pipeline for result in results] == ["mri.neuro.fs"]
+    assert "'ct.*' matches no pipeline" in caplog.text
+    assert not [call for call in xlogin.calls if "/xapi/commands/1" in call[1]]
+
+
+def test_auto_enablement_enables_new_and_admin_disabled_commands(tmp_path):
+    path, downloads = write_catalogue(
+        tmp_path, [("pipeline", ["example"])], {"example": command_bytes()}
+    )
+    desired = load(path, downloads)
+    xlogin = FakeXnat()
+
+    first = reconcile_commands(xlogin, desired, auto_enable=True)
+    xlogin.enabled.clear()  # an administrator disables the command
+    second = reconcile_commands(xlogin, desired, auto_enable=True)
+    third = reconcile_commands(xlogin, desired, auto_enable=True)
+
+    assert [(r[0].status, r[0].enabled) for r in (first, second, third)] == [
+        ("installed", 1),
+        ("unchanged", 1),
+        ("unchanged", 0),
+    ]
+    assert [call[1] for call in xlogin.calls if call[0] == "put"] == [
+        "/xapi/commands/1/wrappers/example/enabled"
+    ] * 2
+    assert xlogin.enabled == {(1, 101)}
+
+
+def test_cli_reads_config_from_environment_before_connecting(tmp_path):
+    path, downloads = write_catalogue(
+        tmp_path, [("pipeline", ["example"])], {"example": command_bytes()}
+    )
+    config_path = tmp_path / "config.yaml"
+    xlogin = FakeXnat()
+    deploy_module = importlib.import_module("pydra2app.xnat.cli.deploy")
+    loader = functools.partial(load_catalogue, download=downloads.__getitem__)
+
+    def invoke(config):
+        config_path.write_text(config)
+        with patch.object(deploy_module, "load_catalogue", loader), patch.object(
+            deploy_module.xnat, "connect", return_value=xlogin
+        ) as connect:
+            result = CliRunner().invoke(
+                deploy_pipelines,
+                [str(path), "--server", "https://xnat.example", "--user", "u"],
+                env={"XNAT_PASS": "p", "PIPELINE_RECONCILER_CONFIG": str(config_path)},
+            )
+        return result, connect.called
+
+    invalid, connected = invoke("enablement: manual\n")
+    assert invalid.exit_code != 0
+    assert "config.enablement must be" in invalid.output
+    assert not connected
+
+    valid, _ = invoke("enablement: auto\n")
+    assert valid.exit_code == 0
+    assert (
+        "pipeline: installed (installed=1, updated=0, unchanged=0, enabled=1)"
+        in valid.output
+    )

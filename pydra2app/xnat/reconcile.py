@@ -1,21 +1,41 @@
 import hashlib
 import json
+import logging
 import re
 import typing as ty
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from urllib.request import urlopen
 
 import xnat
+import yaml
+
+logger = logging.getLogger(__name__)
 
 IMAGE_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 DOWNLOAD_TIMEOUT = 60
 XNAT_ERRORS = (xnat.exceptions.XNATResponseError, OSError)
+ENABLEMENT_MODES = ("approval", "auto")
 
 
 class ReconciliationError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ReconcilerConfig:
+    include: ty.Optional[ty.Tuple[str, ...]] = None
+    exclude: ty.Tuple[str, ...] = ()
+    enablement: str = "approval"
+
+    def selects(self, pipeline_id: str) -> bool:
+        if self.include is not None and not any(
+            fnmatchcase(pipeline_id, pattern) for pattern in self.include
+        ):
+            return False
+        return not any(fnmatchcase(pipeline_id, pattern) for pattern in self.exclude)
 
 
 @dataclass(frozen=True)
@@ -25,12 +45,13 @@ class ReconciliationResult:
     installed: int = 0
     updated: int = 0
     unchanged: int = 0
+    enabled: int = 0
     error: ty.Optional[str] = None
 
     def summary(self) -> str:
         counts = (
             f"installed={self.installed}, updated={self.updated}, "
-            f"unchanged={self.unchanged}"
+            f"unchanged={self.unchanged}, enabled={self.enabled}"
         )
         if self.error:
             return f"{self.pipeline}: {self.status} ({counts}; error={self.error})"
@@ -82,9 +103,47 @@ def _required_text(value: ty.Dict[str, ty.Any], key: str, description: str) -> s
     return text
 
 
+def _patterns(config: ty.Dict[str, ty.Any], key: str) -> ty.Tuple[str, ...]:
+    patterns = config[key]
+    if (
+        not isinstance(patterns, list)
+        or not patterns
+        or not all(isinstance(pattern, str) and pattern for pattern in patterns)
+    ):
+        raise ReconciliationError(
+            f"config.{key} must be a non-empty list of non-empty strings"
+        )
+    return tuple(patterns)
+
+
+def load_config(path: ty.Union[str, Path]) -> ReconcilerConfig:
+    try:
+        config = yaml.safe_load(Path(path).read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+        raise ReconciliationError(
+            f"Could not load reconciler config from {str(path)!r}: {error}"
+        ) from error
+    if not isinstance(config, dict):
+        raise ReconciliationError("config must be a YAML mapping")
+    unknown = set(config) - {"include", "exclude", "enablement"}
+    if unknown:
+        raise ReconciliationError(
+            f"Unknown config keys: {', '.join(sorted(map(repr, unknown)))}"
+        )
+    enablement = config.get("enablement", "approval")
+    if enablement not in ENABLEMENT_MODES:
+        raise ReconciliationError("config.enablement must be 'approval' or 'auto'")
+    return ReconcilerConfig(
+        include=_patterns(config, "include") if "include" in config else None,
+        exclude=_patterns(config, "exclude") if "exclude" in config else (),
+        enablement=enablement,
+    )
+
+
 def load_catalogue(
     source: ty.Union[str, Path],
     download: ty.Callable[[str], bytes] = _download,
+    config: ReconcilerConfig = ReconcilerConfig(),
 ) -> ty.Tuple[_DesiredPipeline, ...]:
     catalogue = _required_mapping(_read_catalogue(source), "catalogue")
     if catalogue.get("schema_version") != "1.0":
@@ -104,6 +163,8 @@ def load_catalogue(
         if pipeline_id in pipeline_ids:
             raise ReconciliationError(f"Duplicate pipeline id {pipeline_id!r}")
         pipeline_ids.add(pipeline_id)
+        if not config.selects(pipeline_id):
+            continue
 
         image = _required_text(pipeline, "image", description)
         if not IMAGE_DIGEST.fullmatch(image):
@@ -176,12 +237,35 @@ def load_catalogue(
             )
         )
 
+    for pattern in (config.include or ()) + config.exclude:
+        if not any(fnmatchcase(pipeline_id, pattern) for pipeline_id in pipeline_ids):
+            logger.warning("Pattern %r matches no pipeline in the catalogue", pattern)
+
     return tuple(sorted(desired_pipelines, key=lambda pipeline: pipeline.pipeline_id))
+
+
+def _enable_for_site(
+    xlogin: xnat.XNATSession, command_id: ty.Any, document: ty.Dict[str, ty.Any]
+) -> bool:
+    """Enables any of the command's wrappers that are disabled for the site, and
+    returns whether there were any"""
+    if command_id is None:
+        raise ReconciliationError("installed command has no id")
+    changed = False
+    for index, value in enumerate(document.get("xnat") or ()):
+        wrapper = _required_mapping(value, f"xnat[{index}]")
+        name = _required_text(wrapper, "name", f"xnat[{index}]")
+        path = f"/xapi/commands/{command_id}/wrappers/{name}/enabled"
+        if xlogin.get(path).json() is not True:
+            xlogin.put(path)
+            changed = True
+    return changed
 
 
 def reconcile_commands(
     xlogin: xnat.XNATSession,
     desired_pipelines: ty.Sequence[_DesiredPipeline],
+    auto_enable: bool = False,
 ) -> ty.Tuple[ReconciliationResult, ...]:
     try:
         installed_values = xlogin.get("/xapi/commands").json()
@@ -205,7 +289,7 @@ def reconcile_commands(
 
     results = []
     for pipeline in desired_pipelines:
-        counts = {"installed": 0, "updated": 0, "unchanged": 0}
+        counts = {"installed": 0, "updated": 0, "unchanged": 0, "enabled": 0}
         errors = []
         for desired in pipeline.commands:
             current = installed.get(desired.name)
@@ -215,9 +299,12 @@ def reconcile_commands(
                         "multiple installed commands share its name"
                     )
                 if current is None:
-                    xlogin.post("/xapi/commands", json=desired.document)
+                    command_id = xlogin.post(
+                        "/xapi/commands", json=desired.document
+                    ).json()
                     counts["installed"] += 1
                 elif current.get("image") == desired.image:
+                    command_id = current.get("id")
                     counts["unchanged"] += 1
                 else:
                     command_id = current.get("id")
@@ -227,6 +314,10 @@ def reconcile_commands(
                     # hence their site and project enablement
                     xlogin.post(f"/xapi/commands/{command_id}", json=desired.document)
                     counts["updated"] += 1
+                if auto_enable and _enable_for_site(
+                    xlogin, command_id, desired.document
+                ):
+                    counts["enabled"] += 1
             except (ReconciliationError, *XNAT_ERRORS) as error:
                 errors.append(f"{desired.name}: {error}")
 
@@ -245,6 +336,7 @@ def reconcile_commands(
                 installed=counts["installed"],
                 updated=counts["updated"],
                 unchanged=counts["unchanged"],
+                enabled=counts["enabled"],
                 error="; ".join(errors) or None,
             )
         )
