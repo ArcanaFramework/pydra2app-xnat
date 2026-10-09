@@ -11,8 +11,10 @@ import yaml
 from pydra2app.xnat.command import XnatCommand
 from pydra2app.xnat.image import XnatApp
 from pydra2app.xnat.reconcile import (
+    ReconcilerConfig,
     ReconciliationError,
     load_catalogue,
+    load_config,
     reconcile_commands,
 )
 
@@ -28,6 +30,7 @@ XNAT_PASS_KEY = "XNAT_PASS"
 XNAT_AUTH_FILE_KEY = "XNAT_AUTH_FILE"
 XNAT_AUTH_FILE_DEFAULT = Path("~/.pydra2app_xnat_user_token.json").expanduser()
 PIPELINE_CATALOGUE_URL_KEY = "PIPELINE_CATALOGUE_URL"
+PIPELINE_RECONCILER_CONFIG_KEY = "PIPELINE_RECONCILER_CONFIG"
 
 
 def load_auth(
@@ -305,6 +308,10 @@ def save_token(auth_file: Path, server: str, user: str, password: str) -> None:
 CATALOGUE is the path or URL of a pipeline-release.json catalogue, and can
 instead be given by the {PIPELINE_CATALOGUE_URL_KEY} environment variable.
 
+The pipelines to reconcile and whether their commands are enabled can be set
+in a YAML file passed to '--config' or the {PIPELINE_RECONCILER_CONFIG_KEY}
+environment variable.
+
 Authentication credentials can be passed through the {XNAT_USER_KEY}
 and {XNAT_PASS_KEY} environment variables. Otherwise, tokens can be saved
 in a JSON file passed to '--auth'.
@@ -314,6 +321,17 @@ in a JSON file passed to '--auth'.
     "catalogue",
     required=False,
     envvar=PIPELINE_CATALOGUE_URL_KEY,
+)
+@click.option(
+    "--config",
+    "config_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    envvar=PIPELINE_RECONCILER_CONFIG_KEY,
+    help=(
+        "YAML file with optional 'include' and 'exclude' lists of pipeline ID "
+        "patterns, and 'enablement' ('approval' or 'auto')"
+    ),
 )
 @click.option(
     "--server",
@@ -340,6 +358,7 @@ in a JSON file passed to '--auth'.
 )
 def deploy_pipelines(
     catalogue: str,
+    config_file: ty.Optional[Path],
     server: str,
     user: str,
     password: str,
@@ -350,7 +369,8 @@ def deploy_pipelines(
             f"Provide a catalogue file or URL, or set {PIPELINE_CATALOGUE_URL_KEY}"
         )
     try:
-        desired_pipelines = load_catalogue(catalogue)
+        config = load_config(config_file) if config_file else ReconcilerConfig()
+        desired_pipelines = load_catalogue(catalogue, config=config)
     except ReconciliationError as error:
         raise click.ClickException(str(error)) from error
     server, user, password = load_auth(server, user, password, auth_file)
@@ -361,7 +381,9 @@ def deploy_pipelines(
         password=password,
     ) as xlogin:
         try:
-            results = reconcile_commands(xlogin, desired_pipelines)
+            results = reconcile_commands(
+                xlogin, desired_pipelines, auto_enable=config.enablement == "auto"
+            )
         except ReconciliationError as error:
             raise click.ClickException(str(error)) from error
 

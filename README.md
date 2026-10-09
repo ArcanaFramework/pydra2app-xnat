@@ -30,11 +30,38 @@ pydra2app ext xnat deploy-pipelines
 ```
 
 The catalogue may instead be passed as a local file or URL argument. The command
-reports each pipeline as `installed`, `updated`, `unchanged`, or `failed`, and exits
-nonzero if any pipeline fails. New commands are installed disabled, existing commands
-are updated in place (keeping their site and project enablement), and commands absent
-from the catalogue are not removed. The XNAT user must be an administrator or a
-Container Service manager.
+reports each pipeline as `installed`, `updated`, `unchanged`, or `failed`, with how
+many of its commands were enabled, and exits nonzero if any pipeline fails. Existing
+commands are updated in place (keeping their site and project enablement), and
+commands absent from the catalogue are not removed. The XNAT user must be an
+administrator or a Container Service manager.
+
+### Selecting and enabling pipelines
+
+A YAML config file passed to `--config` (or `PIPELINE_RECONCILER_CONFIG`) selects
+which catalogue pipelines are reconciled and whether their commands are enabled:
+
+```yaml
+include:              # optional; leave out to take every pipeline
+  - mri.human.neuro.*
+exclude:              # optional; wins over include
+  - mri.human.neuro.bidsapp.*
+enablement: approval  # or "auto"; default is approval
+```
+
+Patterns are case-sensitive wildcards matched against the whole
+catalogue pipeline ID, where `*` also matches `.`. Excluded pipelines are left
+untouched even if already installed: their commands are not downloaded, updated or
+enabled. Invalid config fails before XNAT is contacted, and a pattern matching no
+pipeline logs a warning. Without a config, every pipeline is reconciled in `approval`
+mode.
+
+- `approval`: new commands are installed disabled until an administrator enables them.
+- `auto`: every selected command is enabled for the site on each run, including any
+  an administrator has disabled. To block a pipeline, exclude it, then disable it in
+  XNAT.
+
+Either way, project owners still enable commands for their own projects.
 
 ## License
 
