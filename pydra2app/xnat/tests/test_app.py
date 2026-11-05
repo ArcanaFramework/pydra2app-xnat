@@ -269,7 +269,7 @@ def test_xnat_cs_pipeline(xnat_repository: Xnat, run_spec: dict, work_dir: Path)
         for output_name, sinked_name in output_values.items():
             deriv = next(d for d in blueprint.derivatives if d.path == output_name)
             uploaded_files = sorted(
-                f.name.lstrip("sub-DEFAULT_")
+                f.name.removeprefix("sub-subject_")
                 for f in test_xsession.resources[sinked_name].files
             )
             if cmd.internal_upload:
