@@ -29,6 +29,7 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
     # `App.can_defer_task`)
     image: XnatApp
     internal_upload: bool = attrs.field(default=False)
+    assessor_outputs: bool = attrs.field(default=False)
 
     # Hard-code the axes of XNAT commands to be medimage
     AXES: ty.Optional[ty.Type[Axes]] = MedImage
@@ -58,6 +59,15 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
 
         cmd_json = self.init_command_json()
 
+        if self.assessor_outputs:
+            from .assessors import METADATA_KEY, AssessorError, assessor_definition
+
+            if self.internal_upload:
+                raise AssessorError(
+                    "assessor_outputs cannot be combined with internal_upload"
+                )
+            cmd_json["command-metadata"] = {METADATA_KEY: assessor_definition(self)}
+
         input_args = self.add_input_fields(cmd_json)
 
         param_args = self.add_parameter_fields(cmd_json)
@@ -75,7 +85,8 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
             + output_args
             + param_args
             + xnat_input_args
-            + ["--command", self.name, flag_arg],
+            + ["--command", self.name, flag_arg]
+            + (["--assessor-outputs"] if self.assessor_outputs else []),
         )
 
         return cmd_json
@@ -218,13 +229,13 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
         # Set up output handlers and arguments
         cmd_args = []
         for sink in self.sinks:
-            if not is_fileset_or_union(sink.type):
+            if not is_fileset_or_union(sink.type) and not self.assessor_outputs:
                 logger.debug("Skipping sink %s, not a fileset", sink.name)
                 continue
             sink_type = (
                 optional_type(sink.type) if is_optional(sink.type) else sink.type
             )
-            out_fname = sink.name + (sink_type.ext if sink_type.ext else "")
+            out_fname = sink.name + (getattr(sink_type, "ext", None) or "")
 
             desc = (
                 f"Output ({to_mime(sink_type, official=False)}"
@@ -420,9 +431,70 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
             )
 
         else:
-            raise NotImplementedError(
-                "Wrapper currently only supports session-level pipelines"
-            )
+            if not self.assessor_outputs or self.operates_on not in (
+                MedImage.subject,
+                MedImage.dataset,
+            ):
+                raise NotImplementedError(
+                    "Wrapper currently only supports session-level pipelines "
+                    "unless assessor_outputs is enabled"
+                )
+            is_subject = self.operates_on == MedImage.subject
+            parent = "SUBJECT" if is_subject else "PROJECT"
+            cmd_json["xnat"][0]["contexts"] = [
+                "xnat:subjectData" if is_subject else "xnat:projectData"
+            ]
+            cmd_json["xnat"][0]["external-inputs"] = [
+                {
+                    "name": parent,
+                    "description": parent.capitalize(),
+                    "type": parent.capitalize(),
+                    "required": True,
+                    # CS cannot mount subjects; FrameTree retrieves their inputs by API.
+                    "provides-files-for-command-mount": None if is_subject else "in",
+                    "user-settable": False,
+                    "load-children": True,
+                }
+            ]
+            cmd_json["xnat"][0]["derived-inputs"] = [
+                {
+                    "name": "__PROJECT_ID__",
+                    "type": "string",
+                    "derived-from-wrapper-input": parent,
+                    "derived-from-xnat-object-property": (
+                        "project-id" if is_subject else "id"
+                    ),
+                    "provides-value-for-command-input": "PROJECT_ID",
+                    "user-settable": False,
+                }
+            ]
+            if is_subject:
+                cmd_json["inputs"].append(
+                    {
+                        "name": "SUBJECT_LABEL",
+                        "description": "Subject label",
+                        "type": "string",
+                        "required": True,
+                        "user-settable": False,
+                        "replacement-key": "[SUBJECT_LABEL]",
+                    }
+                )
+                cmd_json["xnat"][0]["derived-inputs"].append(
+                    {
+                        "name": "__SUBJECT_LABEL__",
+                        "type": "string",
+                        "derived-from-wrapper-input": parent,
+                        "derived-from-xnat-object-property": "label",
+                        "provides-value-for-command-input": "SUBJECT_LABEL",
+                        "user-settable": False,
+                    }
+                )
+                cmd_args.append(
+                    "--ids "
+                    + self._env_var_arg(
+                        cmd_json, "ROW", "SUBJECT_LABEL", "[SUBJECT_LABEL]"
+                    )
+                )
 
         return cmd_args
 
@@ -472,4 +544,4 @@ class XnatCommand(ContainerCommand):  # type: ignore[misc]
         return re.sub(r"[^a-zA-Z0-9_]+", "_", path)
 
     COMMAND_INPUT_TYPES = {bool: "bool", str: "string", int: "number", float: "number"}
-    VALID_FREQUENCIES = (MedImage.session, MedImage.dataset)
+    VALID_FREQUENCIES = (MedImage.session, MedImage.subject, MedImage.dataset)

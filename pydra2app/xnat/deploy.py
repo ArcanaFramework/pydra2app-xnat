@@ -3,6 +3,7 @@ import time
 import logging
 import json
 import xnat
+from .assessors import prepare_assessor_command
 from pydra2app.core.exceptions import Pydra2AppError
 from pydra2app.core.utils import extract_file_from_docker_image
 
@@ -66,6 +67,7 @@ def install_cs_command(
             f"{type(image_name_or_command_json)} expected str or dict"
         )
 
+    command_json = prepare_assessor_command(xlogin, command_json)
     cmd_name = command_json["name"]
     wrapper_name = command_json["xnat"][0]["name"]
 
