@@ -11,6 +11,8 @@ from urllib.request import urlopen
 import xnat
 import yaml
 
+from .assessors import AssessorError, prepare_assessor_command
+
 logger = logging.getLogger(__name__)
 
 IMAGE_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -298,12 +300,19 @@ def reconcile_commands(
                     raise ReconciliationError(
                         "multiple installed commands share its name"
                     )
+                document = prepare_assessor_command(xlogin, desired.document)
                 if current is None:
-                    command_id = xlogin.post(
-                        "/xapi/commands", json=desired.document
-                    ).json()
+                    command_id = xlogin.post("/xapi/commands", json=document).json()
                     counts["installed"] += 1
-                elif current.get("image") == desired.image:
+                elif current.get("image") == desired.image and (
+                    document is desired.document
+                    or (
+                        current.get("environment-variables")
+                        == document.get("environment-variables")
+                        and current.get("command-metadata")
+                        == document.get("command-metadata")
+                    )
+                ):
                     command_id = current.get("id")
                     counts["unchanged"] += 1
                 else:
@@ -312,13 +321,13 @@ def reconcile_commands(
                         raise ReconciliationError("installed command has no id")
                     # XNAT updates wrappers in place by name, keeping their IDs and
                     # hence their site and project enablement
-                    xlogin.post(f"/xapi/commands/{command_id}", json=desired.document)
+                    xlogin.post(f"/xapi/commands/{command_id}", json=document)
                     counts["updated"] += 1
                 if auto_enable and _enable_for_site(
                     xlogin, command_id, desired.document
                 ):
                     counts["enabled"] += 1
-            except (ReconciliationError, *XNAT_ERRORS) as error:
+            except (ReconciliationError, AssessorError, *XNAT_ERRORS) as error:
                 errors.append(f"{desired.name}: {error}")
 
         if errors:

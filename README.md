@@ -63,6 +63,51 @@ mode.
 
 Either way, project owners still enable commands for their own projects.
 
+## Pipeline assessor outputs (XNAT 1.10+)
+
+Opt in per command, then rebuild the image:
+
+```yaml
+commands:
+  concatenate:
+    task: frametree.testing.tasks:Concatenate
+    operates_on: medimage/session
+    assessor_outputs: true
+```
+
+`deploy-pipelines` and `install-command` register the type and form; this requires
+a site administrator. Pipeline runs use the launching user's project permissions.
+Installing only through image-label discovery does not register them.
+
+| Frequency | Results are attached to |
+| --- | --- |
+| `medimage/session` | Imaging session |
+| `medimage/subject` | Subject |
+| `medimage/dataset` | Project asset |
+
+Each run processes one session, one subject, or a whole project, respectively.
+Subject inputs are retrieved through the API because Container Service cannot
+mount a subject's archive.
+
+List scalar outputs explicitly in `sinks` (supported: string, integer, float and
+boolean). Outputs are staged until the run succeeds. Files are stored in
+output-named resources; scalar results and run details are in a Custom Form, with
+full provenance in `PROVENANCE/provenance.json`. Form fields are available in
+Advanced Search. Reruns reuse the same assessor and reconcile its output files.
+
+Types and run labels use readable pipeline names. Types are stable; schema changes
+create a new form revision, preserving previous forms and values. Existing types,
+forms and labels are not renamed. Default XNAT layouts are unchanged. Project
+results are searchable project assets, but XNAT 1.10 has no standard detail page
+for browsing their files.
+
+Commands without opt-in are unchanged. On XNAT older than 1.10, assessor outputs
+fall back to the existing storage behavior. `internal_upload` is not supported.
+Reading assessors as FrameTree derivatives is separate work in `frametree-xnat`.
+
+For Container Service REST launches, `root` must be the wrapper input name:
+`SESSION`, `SUBJECT` or `PROJECT`—not an XNAT datatype.
+
 ## License
 
 This work is licensed under a [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](http://creativecommons.org/licenses/by-nc-sa/4.0/)
