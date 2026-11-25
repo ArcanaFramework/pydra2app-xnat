@@ -175,6 +175,12 @@ class XnatApp(App):  # type: ignore[misc]
         xnat_cs_store_entry = {
             "class": "<" + ClassResolver.tostr(XnatViaCS, strip_prefix=False) + ">"
         }
+        if any(command.assessor_outputs for command in self.commands):
+            from .assessor_store import AssessorOutputStore
+
+            xnat_cs_store_entry["class"] = (
+                "<" + ClassResolver.tostr(AssessorOutputStore, strip_prefix=False) + ">"
+            )
         if for_localhost:
             if sys.platform == "linux":
                 ip_address = "172.17.0.1"  # Linux + GH Actions

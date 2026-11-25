@@ -25,6 +25,11 @@ in the format <store-nickname>//<dataset-id>[@<dataset-name>]
 @entrypoint_opts.debugging  # type: ignore[misc]
 @entrypoint_opts.dataset_config  # type: ignore[misc]
 @click.option(
+    "--assessor-outputs",
+    is_flag=True,
+    help="Finalise successful outputs in a deployed XNAT 1.10 dynamic assessor or project asset.",
+)
+@click.option(
     "--internal-upload/--external-upload",
     type=bool,
     default=False,
@@ -37,12 +42,16 @@ def cs_entrypoint(
     address: str,
     spec_path: Path,
     command: ty.Optional[str],
+    assessor_outputs: bool,
     **kwargs: ty.Any,
 ) -> None:
 
     image_spec = XnatApp.load(spec_path)
 
-    image_spec.command(command).execute(
-        address,
-        **kwargs,
-    )
+    selected = image_spec.command(command)
+    if assessor_outputs:
+        from ..assessor_runtime import execute_with_assessor
+
+        execute_with_assessor(selected, address, **kwargs)
+    else:
+        selected.execute(address, **kwargs)
